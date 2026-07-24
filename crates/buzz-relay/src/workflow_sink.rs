@@ -94,13 +94,20 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
         Some(ci - start)
     };
 
-    // A mention is anchored on `@` at a left boundary (start / whitespace / `(`)
-    // and the matched name must not be followed by a name-continuation char —
-    // otherwise `@Will` would match inside `@Willow`. Combined with matching the
-    // longest member name first, this is the whole rule: no punctuation allowlist
-    // to get wrong, and it is unicode-safe (em-dash, emoji all terminate a name).
-    let is_left_boundary = |i: usize| i == 0 || chars[i - 1].is_whitespace() || chars[i - 1] == '(';
-    let extends_name = |c: char| c.is_alphanumeric() || c == '_';
+    // A mention is anchored on `@` at a left boundary — the shared
+    // `is_mention_lead` predicate from buzz-sdk (start / whitespace / `(` /
+    // emphasis `*` `_` / pipe), the same rule the CLI and Desktop parsers
+    // anchor on, so a workflow-emitted `**@Name**` tags exactly like a typed
+    // one (#2686) — and the matched name must not be followed by a
+    // name-continuation char — otherwise `@Will` would match inside
+    // `@Willow`. Combined with matching the longest member name first, this
+    // is the whole rule: no punctuation allowlist to get wrong on the right,
+    // and it is unicode-safe (em-dash, emoji all terminate a name). `_` is a
+    // boundary, not a name-continuation char, matching the other parsers —
+    // member names containing `_` still win via longest-first matching.
+    let is_left_boundary =
+        |i: usize| buzz_sdk::mentions::is_mention_lead(i.checked_sub(1).map(|j| chars[j]));
+    let extends_name = |c: char| c.is_alphanumeric();
 
     let mut out: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -399,6 +406,47 @@ mod tests {
     fn ignores_non_member_and_bare_at() {
         let members = vec![m("Robby", &pk('a'))];
         assert!(resolve_mention_pubkeys("hey @Stranger and @", &members).is_empty());
+    }
+
+    #[test]
+    fn markdown_emphasis_wrapped_mention_matches() {
+        // Regression: #2686 — workflow-emitted `**@Name**` must tag exactly
+        // like a typed `@Name`; the left boundary is the shared
+        // `is_mention_lead` predicate from buzz-sdk.
+        let members = vec![m("Robby", &pk('a'))];
+        assert_eq!(
+            resolve_mention_pubkeys("**@Robby** your fix is aimed wrong", &members),
+            vec![pk('a')]
+        );
+        assert_eq!(
+            resolve_mention_pubkeys("_@Robby_ take a look", &members),
+            vec![pk('a')]
+        );
+        assert_eq!(
+            resolve_mention_pubkeys("*@Robby* and ||@Robby|| again", &members),
+            vec![pk('a')]
+        );
+    }
+
+    #[test]
+    fn table_pipe_flush_mention_matches() {
+        let members = vec![m("Robby", &pk('a'))];
+        assert_eq!(
+            resolve_mention_pubkeys("|@Robby|status|", &members),
+            vec![pk('a')]
+        );
+    }
+
+    #[test]
+    fn underscore_member_name_still_wins_longest_first() {
+        // `_` is a boundary (not a name-continuation char) so trailing
+        // italics can't glue onto a name — but a member whose name contains
+        // `_` still binds fully because longer names match first.
+        let members = vec![m("will", &pk('a')), m("will_smith", &pk('b'))];
+        assert_eq!(
+            resolve_mention_pubkeys("cc @will_smith on this", &members),
+            vec![pk('b')]
+        );
     }
 
     #[test]

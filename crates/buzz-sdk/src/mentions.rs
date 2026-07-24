@@ -56,23 +56,25 @@ pub struct MentionProfile<'a> {
 
 /// Shared leading-delimiter definition for `@mention` starts.
 ///
-/// `prev` is the character immediately before the `@`. A mention may start
-/// at start-of-string, after ASCII whitespace, after an opening parenthesis,
-/// after markdown emphasis markers (`*`, `_`), or after a pipe (`|` — table
-/// cells and spoiler `||`). Anything else — most importantly a word
-/// character, which excludes email addresses like `user@host` — is not a
-/// mention start.
+/// `prev` is the character immediately before the `@` (`None` at
+/// start-of-string). A mention may start at start-of-string, after
+/// whitespace (unicode, matching the JS `\s` class the Desktop regex uses),
+/// after an opening parenthesis, after markdown emphasis markers (`*`, `_`),
+/// or after a pipe (`|` — table cells and spoiler `||`). Anything else —
+/// most importantly a word character, which excludes email addresses like
+/// `user@host` — is not a mention start.
 ///
 /// This mirrors the leading group of the Desktop parser's regex in
 /// `desktop/src/features/messages/lib/hasMention.ts`, except that a single
 /// `|` is accepted here (a strict superset — the TS regex requires `||`) so
-/// mentions flush against markdown table pipes still tag. The two surfaces
-/// must otherwise agree on what counts as a mention; see issue #2526 for
-/// what happens when they drift.
-fn is_mention_lead(prev: Option<char>) -> bool {
+/// mentions flush against markdown table pipes still tag. Every Rust
+/// `@mention` parser must anchor on this predicate — the extractors in this
+/// module and the workflow sink in `buzz-relay` all do; see issues #2526
+/// and #2686 for what happens when boundary rules drift.
+pub fn is_mention_lead(prev: Option<char>) -> bool {
     match prev {
         None => true,
-        Some(c) if c.is_ascii_whitespace() => true,
+        Some(c) if c.is_whitespace() => true,
         Some('(' | '*' | '_' | '|') => true,
         _ => false,
     }
@@ -188,7 +190,8 @@ pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Ve
 
 /// True when `s` starts at a word boundary for a matched known name.
 ///
-/// Accepts end-of-string, ASCII whitespace, closing punctuation, trailing
+/// Accepts end-of-string, whitespace (unicode, matching [`is_mention_lead`]
+/// and the JS `\s` class), closing punctuation, trailing
 /// markdown emphasis markers (`*`, `_`), and pipes (`|` — table cells and
 /// spoiler `||`; single `|` is a superset of the Desktop parser's `||`-only
 /// lookahead, matching [`is_mention_lead`]). The counterpart of
@@ -196,7 +199,7 @@ pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Ve
 /// parser in `desktop/src/features/messages/lib/hasMention.ts`.
 fn is_word_boundary(s: &str) -> bool {
     s.chars().next().is_none_or(|c| {
-        c.is_ascii_whitespace()
+        c.is_whitespace()
             || matches!(
                 c,
                 ',' | ';' | '.' | '!' | '?' | ':' | ')' | ']' | '}' | '*' | '_' | '|'
@@ -480,6 +483,13 @@ mod tests {
         // marker into the name; only the known-names path resolves
         // `_@carol_` to "carol". Pinned so the trade-off stays deliberate.
         assert_eq!(extract_at_names("_@carol_ hi"), vec!["carol_"]);
+    }
+
+    #[test]
+    fn extract_at_names_accepts_unicode_whitespace_lead() {
+        // JS `\s` (the Desktop regex) matches unicode whitespace; so do we.
+        assert_eq!(extract_at_names("hello\u{00A0}@alice"), vec!["alice"]);
+        assert_eq!(extract_at_names("hello\u{3000}@bob"), vec!["bob"]);
     }
 
     #[test]
